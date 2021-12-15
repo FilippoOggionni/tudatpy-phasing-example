@@ -1,33 +1,49 @@
 """
-Copyright (c) 2021. Revolv Space.
+Copyright (c) 2010-2021, Delft University of Technology.
+All rights reserved.
+
+This file is part of the Tudat. Redistribution and use in source and
+binary forms, with or without modification, are permitted exclusively
+under the terms of the Modified BSD license. You should have received
+a copy of the license with this file. If not, please or visit:
+http://tudat.tudelft.nl/LICENSE.
+
+TUDATPY EXAMPLE APPLICATION: two-satellite separation via differential drag
+FOCUS:                       numerical propagation of two LEO satellites with different drag properties
+"""
+
+###############################################################################
+# TUDATPY EXAMPLE APPLICATION: two-satellite separation via differential drag #
+###############################################################################
+
+""" ABSTRACT.
 
 This file was adapted by TUDATPY EXAMPLE APPLICATION: Perturbed Satellite Orbit.
 
-It simulates the orbit of two satellites (marco and olek) for 2 months.
+It simulates the orbits of two LEO satellites separating via differential drag.
 
 The two satellites are 3U cubesats (5kg each), but one of them has 3x the drag surface area
-of the other (satellite side + 2 solar panels of the same size = 3 * 30cm * 10cm).
+of the other, because of different attitudes.
 
 Dynamical model:
 - SH Earth (2, 0)
 - aerodynamic
 - point mass gravity of Sun and Moon
-- Solar Radiation Pressure
 
-At the end of the script, there are some legacy plots from the original tudatpy example.
+The simulation terminates when one of the two occurs:
+- simulation time reaches 60 days
+- angular separation between two satellites reaches 20 degrees (see AngleSeparationTermination class).
 
-I added two plots:
-1. the linear regression of the semi-major axis (NOTE: this is different from the altitude) to see the difference in
-decay of both satellites
-2. the angular separation between the satellite (this is not the difference in true anomaly, because we don't know
-how much the orbital plane changes, therefore I computed the angular separation as the angle between the two position
-vectors, see script).
+Output:
+- figure 1: kepler elements
+- figure 2: drag acceleration norm
+- figure 3: semi-major axis, with linear regression to see the difference in decay of both satellites
+- figure 4: angular separation between the satellites (this is not the difference in true anomaly, because we don't know
+how much the orbital plane changes, therefore the angular separation is computed as the angle between the two position
+vectors).
 
-TODO:
-- create generic function that returns the linear regression of the data
-(rationale: there are a lot of periodic variations in the output variables, e.g. in the Kepler elements, but we are
-not interested in those periodic variations: we want to know the long term trend)
-- plot and assess difference in other Kepler elements (e.g., inclination and RAAN for the orbital plane)
+NOTE: since the output is very dense, the dependent variables plotted have been interpolated to plot a more sparse 
+output (see return_sparse_output function).
 """
 
 ###############################################################################
@@ -44,347 +60,429 @@ from tudatpy.kernel.numerical_simulation import propagation
 from matplotlib import pyplot as plt
 
 
-def main():
-    # Load spice kernels.
-    spice_interface.load_standard_kernels()
 
-    # Set simulation start and end epochs.
-    simulation_start_epoch = 0.0
-    simulation_end_epoch = constants.JULIAN_DAY * 60.0
+# Load spice kernels.
+spice_interface.load_standard_kernels()
 
-    ###########################################################################
-    # CREATE ENVIRONMENT ######################################################
-    ###########################################################################
+# Set simulation start and end epochs.
+simulation_start_epoch = 0.0
+simulation_end_epoch = constants.JULIAN_DAY * 60.0
 
-    # Define string names for bodies to be created from default.
-    bodies_to_create = ["Sun", "Earth", "Moon"]
+###########################################################################
+# CREATE ENVIRONMENT ######################################################
+###########################################################################
 
-    # Use "Earth"/"J2000" as global frame origin and orientation.
-    global_frame_origin = "Earth"
-    global_frame_orientation = "J2000"
+# Define string names for bodies to be created from default.
+bodies_to_create = ["Sun", "Earth", "Moon"]
 
-    # Create default body settings, usually from `spice`.
-    body_settings = environment_setup.get_default_body_settings(
-        bodies_to_create,
-        global_frame_origin,
-        global_frame_orientation)
+# Use "Earth"/"J2000" as global frame origin and orientation.
+global_frame_origin = "Earth"
+global_frame_orientation = "J2000"
 
-    # Create system of selected celestial bodies
-    bodies = environment_setup.create_system_of_bodies(body_settings)
+# Create default body settings, usually from `spice`.
+body_settings = environment_setup.get_default_body_settings(
+    bodies_to_create,
+    global_frame_origin,
+    global_frame_orientation)
 
-    # Create vehicle objects.
-    bodies.create_empty_body("olek")
-    bodies.create_empty_body("marco")
+# Create system of selected celestial bodies
+bodies = environment_setup.create_system_of_bodies(body_settings)
 
-    bodies.get("olek").mass = 5.0
-    bodies.get("marco").mass = 5.0
+# Create vehicle objects.
+bodies.create_empty_body("asterix")
+bodies.create_empty_body("obelix")
 
-    # Create aerodynamic coefficient interface settings, and add to vehicle
-    reference_area = 0.3 * 0.1
-    drag_coefficient = 1.2
-    aero_coefficient_settings = environment_setup.aerodynamic_coefficients.constant(
-        reference_area, [drag_coefficient, 0, 0]
-    )
-    environment_setup.add_aerodynamic_coefficient_interface(
-        bodies, "olek", aero_coefficient_settings)
-    # Second sat
-    reference_area = 3 * 0.3 * 0.1
-    drag_coefficient = 1.2
-    aero_coefficient_settings = environment_setup.aerodynamic_coefficients.constant(
-        reference_area, [drag_coefficient, 0, 0]
-    )
-    environment_setup.add_aerodynamic_coefficient_interface(
-        bodies, "marco", aero_coefficient_settings)
+# Set mass of satellites
+bodies.get("asterix").mass = 5.0
+bodies.get("obelix").mass = 5.0
 
-    # Create radiation pressure settings, and add to vehicle
-    reference_area_radiation = 0.3 * 0.1
-    radiation_pressure_coefficient = 1.2
-    occulting_bodies = ["Earth"]
-    radiation_pressure_settings = environment_setup.radiation_pressure.cannonball(
-        "Sun", reference_area_radiation, radiation_pressure_coefficient, occulting_bodies
-    )
-    environment_setup.add_radiation_pressure_interface(
-        bodies, "olek", radiation_pressure_settings)
-    environment_setup.add_radiation_pressure_interface(
-        bodies, "marco", radiation_pressure_settings)
+# Create aerodynamic coefficient interface settings and add it to the first satellite
+reference_area = 0.1 * 0.1
+drag_coefficient = 1.2
+aero_coefficient_settings = environment_setup.aerodynamic_coefficients.constant(
+    reference_area, [drag_coefficient, 0, 0]
+)
+environment_setup.add_aerodynamic_coefficient_interface(
+    bodies, "asterix", aero_coefficient_settings)
 
-    ###########################################################################
-    # CREATE ACCELERATIONS ####################################################
-    ###########################################################################
+# Create aerodynamic coefficient interface settings and add it to the second satellite (3x surface area)
+reference_area = 3 * 0.1 * 0.1
+drag_coefficient = 1.2
+aero_coefficient_settings = environment_setup.aerodynamic_coefficients.constant(
+    reference_area, [drag_coefficient, 0, 0]
+)
+environment_setup.add_aerodynamic_coefficient_interface(
+    bodies, "obelix", aero_coefficient_settings)
 
-    # Define bodies that are propagated.
-    bodies_to_propagate = ["olek", "marco"]
+###########################################################################
+# CREATE ACCELERATIONS ####################################################
+###########################################################################
 
-    # Define central bodies.
-    central_bodies = ["Earth", "Earth"]
+# Define bodies that are propagated.
+bodies_to_propagate = ["asterix", "obelix"]
 
-    # Define accelerations acting on Delfi-C3 by Sun and Earth.
-    accelerations_settings_delfi_c3 = dict(
-        Sun=[
-            propagation_setup.acceleration.cannonball_radiation_pressure(),
-            propagation_setup.acceleration.point_mass_gravity()
-        ],
-        Earth=[
-            propagation_setup.acceleration.spherical_harmonic_gravity(2, 0),
-            propagation_setup.acceleration.aerodynamic()
-        ],
-        Moon=[
-            propagation_setup.acceleration.point_mass_gravity()
-        ],
-    )
+# Define central bodies.
+central_bodies = ["Earth", "Earth"]
 
-    # Create global accelerations settings dictionary.
-    acceleration_settings = {"olek": accelerations_settings_delfi_c3,
-                             "marco": accelerations_settings_delfi_c3}
+# Define accelerations acting on both satellites
+accelerations_settings = dict(
+    Sun=[
+        propagation_setup.acceleration.point_mass_gravity()
+    ],
+    Earth=[
+        propagation_setup.acceleration.spherical_harmonic_gravity(2, 0),
+        propagation_setup.acceleration.aerodynamic()
+    ],
+    Moon=[
+        propagation_setup.acceleration.point_mass_gravity()
+    ],
+)
 
-    # Create acceleration models.
-    acceleration_models = propagation_setup.create_acceleration_models(
-        bodies,
-        acceleration_settings,
-        bodies_to_propagate,
-        central_bodies)
+# Create global accelerations settings dictionary
+acceleration_settings = {"asterix": accelerations_settings,
+                         "obelix": accelerations_settings}
 
-    ###########################################################################
-    # CREATE PROPAGATION SETTINGS #############################################
-    ###########################################################################
+# Create acceleration models
+acceleration_models = propagation_setup.create_acceleration_models(
+    bodies,
+    acceleration_settings,
+    bodies_to_propagate,
+    central_bodies)
 
-    # Set initial conditions for the Asterix satellite that will be
-    # propagated in this simulation. The initial conditions are given in
-    # Kepler elements and later on converted to Cartesian elements.
-    earth_gravitational_parameter = bodies.get("Earth").gravitational_parameter
-    initial_state = element_conversion.keplerian_to_cartesian_elementwise(
-        gravitational_parameter=earth_gravitational_parameter,
-        semi_major_axis=6378.0E3 + 500.0E3,
-        eccentricity=0.0,
-        inclination=np.deg2rad(97.4),
-        argument_of_periapsis=np.deg2rad(235.7),
-        longitude_of_ascending_node=np.deg2rad(23.4),
-        true_anomaly=np.deg2rad(139.87)
-    )
-    initial_states = np.concatenate((initial_state, initial_state))
+###########################################################################
+# CREATE PROPAGATION SETTINGS #############################################
+###########################################################################
 
-    # Define list of dependent variables to save.
-    dependent_variables_to_save = [
-        propagation_setup.dependent_variable.total_acceleration("olek"),
-        propagation_setup.dependent_variable.keplerian_state("olek", "Earth"),
-        propagation_setup.dependent_variable.latitude("olek", "Earth"),
-        propagation_setup.dependent_variable.longitude("olek", "Earth"),
-        propagation_setup.dependent_variable.single_acceleration_norm(
-            propagation_setup.acceleration.point_mass_gravity_type, "olek", "Sun"
-        ),
-        propagation_setup.dependent_variable.single_acceleration_norm(
-            propagation_setup.acceleration.point_mass_gravity_type, "olek", "Moon"
-        ),
-        propagation_setup.dependent_variable.single_acceleration_norm(
-            propagation_setup.acceleration.spherical_harmonic_gravity_type, "olek", "Earth"
-        ),
-        propagation_setup.dependent_variable.single_acceleration_norm(
-            propagation_setup.acceleration.aerodynamic_type, "olek", "Earth"
-        ),
-        propagation_setup.dependent_variable.single_acceleration_norm(
-            propagation_setup.acceleration.cannonball_radiation_pressure_type, "olek", "Sun"
-        ),
-        propagation_setup.dependent_variable.keplerian_state("marco", "Earth"),
-    ]
+# Set equal initial conditions for both satellites
+# The initial conditions are given in  Kepler elements and later on converted to Cartesian elements
+# The satellites are placed in a Sun-Synchronous Orbit at an altitude of 500km
 
+# Retrieve Earth's gravitational parameter
+earth_gravitational_parameter = bodies.get("Earth").gravitational_parameter
+# Retrieve Earth's radius
+earth_radius = bodies.get("Earth").shape_model.average_radius
+# Convert keplerian to cartesian elements
+initial_state = element_conversion.keplerian_to_cartesian_elementwise(
+    gravitational_parameter=earth_gravitational_parameter,
+    semi_major_axis=earth_radius + 500.0E3,
+    eccentricity=0.0,
+    inclination=np.deg2rad(97.4),
+    argument_of_periapsis=np.deg2rad(235.7),
+    longitude_of_ascending_node=np.deg2rad(23.4),
+    true_anomaly=np.deg2rad(139.87)
+)
+# Both satellites have the same inital state
+initial_states = np.concatenate((initial_state, initial_state))
 
-    # Create propagation settings.
-    termination_condition = propagation_setup.propagator.time_termination(simulation_end_epoch)
-    propagator_settings = propagation_setup.propagator.translational(
-        central_bodies,
-        acceleration_models,
-        bodies_to_propagate,
-        initial_states,
-        termination_condition,
-        output_variables=dependent_variables_to_save
-    )
-    # Create numerical integrator settings.
-    initial_step_size = 10.0
-    maximum_step_size = 100.0
-    minimum_step_size = 1.0
-    tolerance = 1.0E-10
-    integrator_settings = propagation_setup.integrator.runge_kutta_variable_step_size(
-        simulation_start_epoch,
-        initial_step_size,
-        propagation_setup.integrator.RKCoefficientSets.rkf_78,
-        minimum_step_size,
-        maximum_step_size,
-        tolerance,
-        tolerance)
+# Define list of dependent variables to save
+dependent_variables_to_save = [
+    propagation_setup.dependent_variable.keplerian_state("asterix", "Earth"),
+    propagation_setup.dependent_variable.keplerian_state("obelix", "Earth"),
+    propagation_setup.dependent_variable.single_acceleration_norm(
+        propagation_setup.acceleration.aerodynamic_type, "asterix", "Earth"
+    ),
+    propagation_setup.dependent_variable.single_acceleration_norm(
+        propagation_setup.acceleration.aerodynamic_type, "obelix", "Earth"
+    ),
+]
 
-    ###########################################################################
-    # PROPAGATE ORBIT #########################################################
-    ###########################################################################
+from tudatpy.kernel.numerical_simulation.environment import SystemOfBodies
 
-    # Create simulation object and propagate dynamics.
-    dynamics_simulator = numerical_simulation.SingleArcSimulator(
-        bodies, integrator_settings, propagator_settings)
-    states = dynamics_simulator.state_history
-    dependent_variables = dynamics_simulator.dependent_variable_history
+class AngleSeparationTermination:
 
-    ###########################################################################
-    # PLOT RESULTS    #########################################################
-    ###########################################################################
+    # Constructor
+    def __init__(self, bodies: SystemOfBodies, maximum_angular_separation: float):
+        """
+        Constructor.
+        """
+        # Store input arguments as class attribute
+        self.bodies = bodies
+        self.maximum_angular_separation = maximum_angular_separation
+        # Create container to store separation angle
+        # The first element is neeeded because at the first epoch the termination settings are not checked
+        self.separation_angle_history = [0.0]
+        # Create termination reason to understand if time or angular separation triggered the termination
+        self.termination_reason = "Final epoch of the propagation was reached."
 
-    # By use of the dependent variable history, we can infer some interesting
-    #  insight into the role that the various acceleration types play during
-    #  the propagation, how the perturbers affect the kepler elements and what
-    #  the ground track of Delfi-C3 would look like!
+    def compute_angular_separation(self, state_1: np.ndarray, state_2: np.ndarray):
+        """
+        Computes the angular separation between two objects.
+        TODO: add valid range
 
-    import matplotlib as mpl
-    from matplotlib import pyplot as plt
+        Parameters
+        ----------
+        state_1 : numpy.ndarray
+            Cartesian state of the first object.
+        state_2 : numpy.ndarray
+            Cartesian state of the second object.
 
-    time = dependent_variables.keys()
-    time_hours = [t / 3600 for t in time]
-
-    states_list = np.vstack(list(states.values()))
-    dependent_variable_list = np.vstack(list(dependent_variables.values()))
-
-    # Plot Kepler elements as a function of time
-    kepler_elements = dependent_variable_list[:, 3:9]
-    fig, ((ax1, ax2), (ax3, ax4), (ax5, ax6)) = plt.subplots(3, 2, figsize=(20, 17))
-    fig.suptitle('Evolution of Kepler elements over the course of the propagation.')
-
-    # Semi-major Axis
-    semi_major_axis = [element / 1000 for element in kepler_elements[:, 0]]
-    ax1.plot(time_hours, semi_major_axis)
-    ax1.set_ylabel('Semi-major axis [km]')
-
-    # Eccentricity
-    eccentricity = kepler_elements[:, 1]
-    ax2.plot(time_hours, eccentricity)
-    ax2.set_ylabel('Eccentricity [-]')
-
-    # Inclination
-    inclination = [np.rad2deg(element) for element in kepler_elements[:, 2]]
-    ax3.plot(time_hours, inclination)
-    ax3.set_ylabel('Inclination [deg]')
-
-    # Argument of Periapsis
-    argument_of_periapsis = [np.rad2deg(element) for element in kepler_elements[:, 3]]
-    ax4.plot(time_hours, argument_of_periapsis)
-    ax4.set_ylabel('Argument of Periapsis [deg]')
-
-    # Right Ascension of the Ascending Node
-    raan = [np.rad2deg(element) for element in kepler_elements[:, 4]]
-    ax5.plot(time_hours, raan)
-    ax5.set_ylabel('RAAN [deg]')
-
-    # True Anomaly
-    true_anomaly = [np.rad2deg(element) for element in kepler_elements[:, 5]]
-    ax6.scatter(time_hours, true_anomaly, s=1)
-    ax6.set_ylabel('True Anomaly [deg]')
-    ax6.set_yticks(np.arange(0, 361, step=60))
-
-    for ax in fig.get_axes():
-        ax.set_xlabel('Time [hr]')
-        ax.set_xlim([min(time_hours), max(time_hours)])
-        ax.grid()
-    plt.figure(figsize=(17, 5))
-
-    # Plot accelerations as a function of time
-
-    # Point Mass Gravity Acceleration Sun
-    acceleration_norm_pm_sun = dependent_variable_list[:, 11]
-    plt.plot(time_hours, acceleration_norm_pm_sun, label='PM Sun')
-
-    # Point Mass Gravity Acceleration Moon
-    acceleration_norm_pm_moon = dependent_variable_list[:, 12]
-    plt.plot(time_hours, acceleration_norm_pm_moon, label='PM Moon')
-
-    # Spherical Harmonic Gravity Acceleration Earth
-    acceleration_norm_sh_earth = dependent_variable_list[:, 13]
-    plt.plot(time_hours, acceleration_norm_sh_earth, label='SH Earth')
-
-    # Aerodynamic Acceleration Earth
-    acceleration_norm_aero_earth = dependent_variable_list[:, 14]
-    plt.plot(time_hours, acceleration_norm_aero_earth, label='Aerodynamic Earth')
-
-    # Cannonball Radiation Pressure Acceleration Sun
-    acceleration_norm_rp_sun = dependent_variable_list[:, 15]
-    plt.plot(time_hours, acceleration_norm_rp_sun, label='Radiation Pressure Sun')
-
-    plt.grid()
-
-    plt.title("Accelerations norms on Delfi-C3, distinguished by type and origin, over the course of propagation.")
-    plt.xlim([min(time_hours), max(time_hours)])
-    plt.xlabel('Time [hr]')
-    plt.ylabel('Acceleration Norm [m/s$^2$]')
-
-    plt.legend(bbox_to_anchor=(1.04, 1))
-    plt.yscale('log')
-
-    ##### REVOLV PLOTS ####
-    from scipy import interpolate
-    # Extract second satellite's keplerian elements
-    sma_second = [sma / 1000 for sma in dependent_variable_list[:, 16]]
-    # Compute average and trend of semi-major axis
-    # Create time vector to evaluate values
-    time_plot = np.linspace(simulation_start_epoch, simulation_end_epoch, 500)
-    # In days
-    time_days = [sec / 3600 / 24 for sec in time_plot]
-    # Interpolate values
-    interpolated_sma_func = interpolate.interp1d(list(time), semi_major_axis)
-    ls = np.polyfit(list(time), semi_major_axis, 1)
-    offset = ls[1]
-    slope = ls[0]
-    ls_2 = np.polyfit(list(time), sma_second, 1)
-    offset_2 = ls_2[1]
-    slope_2 = ls_2[0]
-    # Create array of values
-    trend = [offset + slope * el for el in list(time_plot)]
-    trend_2 = [offset_2 + slope_2 * el for el in list(time_plot)]
-    interpolated_sma = [interpolated_sma_func(el) for el in list(time_plot)]
-    # Plot
-    fig, ax = plt.subplots()
-    ax.plot(time_days, interpolated_sma, label="Interpolated data", color="b")
-    ax.plot(time_days, trend, label="Trend 1", color="r")
-    ax.plot(time_days, trend_2, label="Trend 2", color="k")
-
-    ax.set_xlabel("Simulation time [days]")
-    ax.set_ylabel("Trend of semi-major axis [km]")
-    ax.legend()
-
-
-    # Compute angular separation between satellites
-    states_1 = states_list[:, :6]
-    states_2 = states_list[:, 6:]
-    angular_sep = []
-    for i in range(states_1.shape[0]):
-        # Get scalar product
-        scalar_product = np.dot(states_1[i, :3], states_2[i, :3])
-        # Get costheta
-        cos_theta = scalar_product / (np.linalg.norm(states_1[i, :3]) * np.linalg.norm(states_2[i, :3]))
+        Returns
+        -------
+        float
+            Angle between the two objects.
+        """
+        # Check input for state 1
+        if state_1.shape != (6, ):
+            err_msg = "Input must be a cartesian state vector of 6 components, but the one provided has shape " \
+                      + str(state_1.shape)
+            raise ValueError(err_msg)
+        # Check input for state 2
+        if state_2.shape != (6, ):
+            err_msg = "Input must be a cartesian state vector of 6 components, but the one provided has shape " \
+                      + str(state_2.shape)
+            raise ValueError(err_msg)
+        # Get scalar product of position vector
+        scalar_product = np.dot(state_1[:3], state_2[:3])
+        # Compute the cosine of the separation angle
+        cos_theta = scalar_product / (np.linalg.norm(state_1[:3]) * np.linalg.norm(state_2[:3]))
+        # Check the validity of cosine
+        # TODO: check this
         if cos_theta < -1.0:
             cos_theta = -1.0
         elif cos_theta > 1.0:
             cos_theta = 1.0
-        # Get angle
-        angle = np.arccos(cos_theta)
-        angular_sep.append(angle)
+        # Compute separation angle
+        separation_angle = np.arccos(cos_theta)
+        return separation_angle
 
-    angular_sep = np.array(angular_sep)
-    # Plot this quantity over time
-    # Interpolate values
-    interpolated_ang_func = interpolate.interp1d(list(time), angular_sep)
-    ls = np.polyfit(list(time), angular_sep, 1)
-    offset = ls[1]
-    slope = ls[0]
-    # Create array of values
-    trend_ang = [offset + slope * el for el in list(time_plot)]
-    interpolated_ang = [interpolated_ang_func(el) for el in list(time_plot)]
+    def terminate_propagation(self, time: float):
+        """
+        Checks whether the maximum angular separation has been reached.
+
+        This function is usually supplied to propagation_setup.termination.custom, so the function signature cannot
+        be changed. The function is called at each time step and retrieves dynamically the state vector.
+
+        Parameters
+        ----------
+        time : float
+            Current time of the propagation (unused).
+
+        Returns
+        -------
+        bool
+            Whether the maximum angular separation has been reached.
+        """
+        # Retrieve states of the two objects
+        state_1 = self.bodies.get("asterix").state
+        state_2 = self.bodies.get("obelix").state
+        # Compute angular separation
+        separation_angle = self.compute_angular_separation(state_1, state_2)
+        # Store separation angle
+        self.separation_angle_history.append(separation_angle)
+        # Check if the current angular separation exceeds the threshold
+        if separation_angle >= self.maximum_angular_separation:
+            stop_propagation = True
+            self.termination_reason = "Maximum angular separation reached."
+        else:
+            stop_propagation = False
+        return stop_propagation
+
+# Create object to compute angular separation
+maximum_angular_separation = np.deg2rad(20.0)
+angular_separation = AngleSeparationTermination(bodies, maximum_angular_separation)
+
+# Set termination settings
+# Time termination
+time_termination_condition = propagation_setup.propagator.time_termination(simulation_end_epoch)
+# Custom termination
+angle_termination_condition = propagation_setup.propagator.custom_termination(angular_separation.terminate_propagation)
+# Create hybrid termination settings
+termination_list = [time_termination_condition, angle_termination_condition]
+hybrid_termination = propagation_setup.propagator.hybrid_termination(termination_list, fulfill_single_condition=True)
+
+# Create propagation settings
+propagator_settings = propagation_setup.propagator.translational(
+    central_bodies,
+    acceleration_models,
+    bodies_to_propagate,
+    initial_states,
+    hybrid_termination,
+    output_variables=dependent_variables_to_save
+)
+
+# Create numerical integrator settings
+initial_step_size = 10.0
+maximum_step_size = 100.0
+minimum_step_size = 1.0
+tolerance = 1.0E-10
+integrator_settings = propagation_setup.integrator.runge_kutta_variable_step_size(
+    simulation_start_epoch,
+    initial_step_size,
+    propagation_setup.integrator.RKCoefficientSets.rkf_78,
+    minimum_step_size,
+    maximum_step_size,
+    tolerance,
+    tolerance)
+
+###########################################################################
+# PROPAGATE ORBIT #########################################################
+###########################################################################
+
+# Create simulation object and propagate dynamics.
+dynamics_simulator = numerical_simulation.SingleArcSimulator(
+    bodies, integrator_settings, propagator_settings)
+states = dynamics_simulator.state_history
+dependent_variables = dynamics_simulator.dependent_variable_history
+
+# Check which termination setting triggered the termination of the propagation
+print("Termination reason:" + angular_separation.termination_reason)
+
+###########################################################################
+# PLOT RESULTS    #########################################################
+###########################################################################
+
+from matplotlib import pyplot as plt
+from scipy import interpolate
+
+def return_sparse_output(time_history, variable_history, datapoints=500):
+    """
+    Interpolates a time series of values and returns a "less dense" time series.
+
+    Parameters
+    ----------
+    time_history : numpy.ndarray
+        Vector of epochs.
+    variable_history : numpy.ndarray
+        Vector of values.
+    datapoints : int
+        Size of the sparse output vectors.
+
+    Returns
+    -------
+    tuple(numpy.ndarray, numpy.ndarray)
+        Sparse output vectors (time and values).
+    """
+    # Interpolate to get less dense output
+    interp_function = interpolate.interp1d(time_history, variable_history)
+    # Create vector of days to evaluate function
+    time_interp = np.linspace(time[0], time[-1], datapoints)
+    # Evaluate time vector
+    interpolated_values = [interp_function(epoch) for epoch in time_interp]
+    return time_interp, interpolated_values
+
+
+# Get time and transform it in hours
+time = list(dependent_variables.keys())
+time_days = [t / 3600 / 24 for t in time]
+
+# Get states and dependent variables
+states_list = np.vstack(list(states.values()))
+dependent_variable_list = np.vstack(list(dependent_variables.values()))
+
+# Plot Kepler elements as a function of time
+kepler_elements = dependent_variable_list[:, :12]
+fig, ((ax1, ax2), (ax3, ax4), (ax5, ax6)) = plt.subplots(3, 2)
+fig.suptitle('Kepler elements')
+
+# Loop over Kepler elements in the following order
+y_labels = ['Semi-major axis [km]',
+            'Eccentricity [-]',
+            'Inclination [deg]',
+            'Argument of Periapsis [deg]',
+            'RAAN [deg]',
+            'True Anomaly [deg]']
+axes = [ax1, ax2, ax3, ax4, ax5, ax6]
+
+for element_number in range(6):
+    # Retrieve element list for both satellites
+    element_list_1 = kepler_elements[:, element_number]
+    element_list_2 = kepler_elements[:, element_number + 6]
+    # Convert semi-major axis to kilometers
+    if element_number == 0:
+        element_list_1 = [element / 1000 for element in element_list_1]
+        element_list_2 = [element / 1000 for element in element_list_2]
+        # Store semi-major axis for later
+        sma_1 = element_list_1
+        sma_2 = element_list_2
+    # Convert radians to degrees
+    elif element_number >= 2:
+        element_list_1 = [np.rad2deg(element) for element in element_list_1]
+        element_list_2 = [np.rad2deg(element) for element in element_list_2]
+    # Interpolate to get less dense output
+    time_interp_1, values_interp_1 = return_sparse_output(time, element_list_1, 500)
+    time_interp_2, values_interp_2 = return_sparse_output(time, element_list_2, 500)
+    # Convert time to days
+    time_interp_days = [epoch / 24 / 3600.0 for epoch in time_interp_1]
+    # Get current axis
+    current_ax = axes[element_number]
     # Plot
-    fig, ax = plt.subplots()
-    ax.plot(time_days, np.rad2deg(interpolated_ang), label="Interpolated data", color="b")
-    ax.plot(time_days, np.rad2deg(trend_ang), label="Trend", color="r")
+    current_ax.plot(time_interp_days, values_interp_1, label="Asterix")
+    current_ax.plot(time_interp_days, values_interp_2, label="Obelix")
+    # Plot settings
+    if element_number >= 4:
+        current_ax.set_xlabel('Time [days]')
+    current_ax.set_xlim([min(time_days), max(time_days)])
+    current_ax.set_ylabel(y_labels[element_number])
+    current_ax.grid()
+    if element_number == 0:
+        current_ax.legend()
 
-    ax.set_xlabel("Simulation time [days]")
-    ax.set_ylabel("Trend of angular separation [deg]")
-    plt.show()
+# Plot drag acceleration as a function of time
+fig, ax = plt.subplots()
+# Retrieve drag acceleration
+drag_acceleration_norm_1 = dependent_variable_list[:, -2]
+drag_acceleration_norm_2 = dependent_variable_list[:, -1]
+# Interpolate to get less dense values
+time_interp_1, drag_interp_1 = return_sparse_output(time, drag_acceleration_norm_1, 500)
+time_interp_2, drag_interp_2 = return_sparse_output(time, drag_acceleration_norm_2, 500)
+# Convert time to days
+time_interp_days = [epoch / 24 / 3600.0 for epoch in time_interp_1]
+# Plot values
+ax.plot(time_interp_days, drag_interp_1, label="Asterix")
+ax.plot(time_interp_days, drag_interp_2, label="Obelix")
+# Plot settings
+ax.set_xlabel('Time [days]')
+ax.set_ylabel(r"Drag acceleration norm [$m s^{-2}$]")
+ax.grid()
+ax.set_title("Drag acceleration")
+ax.legend()
 
-    # Final statement (not required, though good practice in a __main__).
-    return 0
+
+# Compute offset and trend of semi-major axis
+# First satellite
+ls = np.polyfit(list(time), sma_1, 1)
+offset = ls[1]
+slope = ls[0]
+# Second satellite
+ls_2 = np.polyfit(list(time), sma_2, 1)
+offset_2 = ls_2[1]
+slope_2 = ls_2[0]
+# Create time vector to evaluate values and convert it to days
+time_plot = np.linspace(time[0], time[-1], 2)
+time_plot_days = [sec / 3600 / 24 for sec in time_plot]
+# Create array of values
+trend_1 = [offset + slope * el for el in list(time_plot)]
+trend_2 = [offset_2 + slope_2 * el for el in list(time_plot)]
+# Plot
+fig, ax = plt.subplots()
+# Interpolate values for semi-major axis
+time_interp_1, sma_interp_1 = return_sparse_output(time, sma_1, 500)
+time_interp_2, sma_interp_2 = return_sparse_output(time, sma_2, 500)
+# Convert time to days
+time_interp_days = [epoch / 24 / 3600.0 for epoch in time_interp_1]
+# Plot values
+ax.plot(time_interp_days, sma_interp_1, label="Asterix")
+ax.plot(time_interp_days, sma_interp_2, label="Obelix")
+# Plot trend
+ax.plot(time_plot_days, trend_1, label="Asterix - trend")
+ax.plot(time_plot_days, trend_2, label="Obelix - trend")
+# Plot settings
+ax.set_title("Trend of semi-major axis")
+ax.set_xlabel("Time [days]")
+ax.set_ylabel("Semi-major axis [km")
+ax.grid()
+ax.legend(loc='lower left')
+
+# Plot angular separation
+angular_separation_list = np.rad2deg(angular_separation.separation_angle_history)
+# Plot
+fig, ax = plt.subplots()
+ax.plot(time_days, angular_separation_list)
+ax.set_xlabel("Time [days]")
+ax.set_ylabel("Angular separation [deg]")
+ax.set_title("Angular separation between two satellites")
+ax.grid()
+
+plt.show()
 
 
-if __name__ == "__main__":
-    main()
