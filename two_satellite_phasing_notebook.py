@@ -615,3 +615,5 @@ ax.set_ylabel("Angular separation [deg]")
 ax.set_title("Angular separation between two satellites")
 ax.grid()
 
+# Uncomment this to see plots
+# plt.show()
