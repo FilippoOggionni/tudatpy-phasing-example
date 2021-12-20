@@ -194,6 +194,13 @@ class AngleSeparationTermination:
     def __init__(self, bodies: SystemOfBodies, maximum_angular_separation: float):
         """
         Constructor.
+
+        Parameters
+        ----------
+        bodies : SystemOfBodies
+            SystemOfBodies object.
+        maximum_angular_separation : float
+            Maximum angular separation (in rad) allowed before the propagation is stopped.
         """
         # Store input arguments as class attribute
         self.bodies = bodies
